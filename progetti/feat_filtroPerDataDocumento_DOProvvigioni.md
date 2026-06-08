@@ -84,9 +84,9 @@ FiltroPanel popola xElenco con la lista filtrata
 
 - **Errore:** Non ho effettuato l'associazione attraverso `setAssociatedBeanField` dunque il server non riceveva i valori di fromPRDDOC e toPRDDOC.
   **Soluzione:** Ho effettuato il collegamento all'interno delle `Properties` del `DateInputBox` nel campo `associatedBeanField`.
-- **Errore:** Lato server avevo impostato erroneamente i due campi `persistent=true`.
-  **Soluzione:** Ho cambiato il parametro in `persistent=false` in quanto si tratta di campi dedicati al filtraggio per cui non è necessario effettuare INSERT/UPDATE.
 
+- **Errore:** Lato server Avevo impostato erroneamente i campi fromPRDDOC e toPRDDOC con l'argomento `persistent=true`.
+  **Soluzione:** Ho cambiato il parametro in `persistent=false` in quanto si tratta di campi dedicati al filtraggio per cui non è necessario effettuare INSERT/UPDATE e dunque vengono salvati solo in memeoria.
 
 ---
 

@@ -55,7 +55,6 @@ La `c.bind(o)` copia automaticamente solo i campi che appartengono alla tabella 
 - **Errore:** Nel `tryGetString` avevo inserito il nome della colonna sbagliato.
   **Soluzione:** Ho sostituito il nome della colonna passata nell'argomento del metodo. In caso di imputazione di Alias alla colonna, è possibile utilizzare anche quest'ultimo.
 
-
 ---
 
 ## Concetti collegati
