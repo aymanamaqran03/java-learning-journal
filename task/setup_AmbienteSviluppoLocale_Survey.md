@@ -218,6 +218,139 @@ Le tabelle principali del Survey sono:
 
 ---
 
+## Parte 3b — Configurazione iniziale del database PostgreSQL (solo prima volta)
+
+Dopo aver avviato il NGP Stack, il database PostgreSQL del Modulo Base contiene solo il minimo indispensabile per far funzionare il login. Due configurazioni aggiuntive sono necessarie per far funzionare il Survey in locale: i **ruoli** e il **client OAuth2 del backend**.
+
+> **Nota:** in produzione queste configurazioni esistono già. In locale il container PostgreSQL parte da un'immagine che non le include, e nessuno script nel progetto le inserisce automaticamente. Vanno fatte **una volta sola** — sopravvivono ai riavvii del container finché il volume Docker non viene cancellato.
+
+---
+
+### Configurazione 1 — Ruoli (`mb_role`)
+
+#### Perché è necessario
+
+Quando il Survey crea un nuovo utente (company o candidato), chiama il Modulo Base per registrarlo con un ruolo specifico (`COMPANY`, `CANDIDATE` o `ROLE_ADMIN`). Il Modulo Base cerca quel ruolo nella tabella `mb_role` del suo database PostgreSQL. Se non lo trova, restituisce un errore 500.
+
+#### Come inserirli
+
+```powershell
+docker exec postgresql psql -U admin -d modulobase -c "
+INSERT INTO mb_role (role_name, annullato, data_creazione, data_aggiornamento, creato_da, aggiornato_da, programma)
+VALUES ('COMPANY', '', NOW(), NOW(), 'system', 'system', '') ON CONFLICT (role_name) DO NOTHING;
+INSERT INTO mb_role (role_name, annullato, data_creazione, data_aggiornamento, creato_da, aggiornato_da, programma)
+VALUES ('CANDIDATE', '', NOW(), NOW(), 'system', 'system', '') ON CONFLICT (role_name) DO NOTHING;
+INSERT INTO mb_role (role_name, annullato, data_creazione, data_aggiornamento, creato_da, aggiornato_da, programma)
+VALUES ('ROLE_ADMIN', '', NOW(), NOW(), 'system', 'system', '') ON CONFLICT (role_name) DO NOTHING;"
+```
+
+#### Verifica
+
+```powershell
+docker exec postgresql psql -U admin -d modulobase -c "SELECT role_name FROM mb_role;"
+```
+
+Devono comparire almeno `COMPANY`, `CANDIDATE` e `ROLE_ADMIN`.
+
+---
+
+### Configurazione 2 — Client OAuth2 del backend (`application-survey`)
+
+#### Perché è necessario
+
+Il backend Survey non parla direttamente col database del Modulo Base: gli fa **chiamate HTTP** tramite un client Feign. Prima di ogni chiamata, il Survey si autentica presso il Modulo Base usando il flusso OAuth2 **client credentials** — un flusso server-to-server, senza utente coinvolto.
+
+Il Survey si presenta con:
+- `client-id`: `application-survey`
+- `client-secret`: `surveyaxia`
+
+(Configurati in `survey/src/main/resources/application-local.yaml`)
+
+Il Modulo Base cerca queste credenziali nella tabella `mb_registered_application`. Se non le trova, risponde con un 401 a qualsiasi chiamata del Survey, anche alle endpoint pubbliche.
+
+#### Come inserirlo
+
+La registrazione richiede un record nella tabella principale più due record nelle tabelle correlate (metodo di autenticazione e grant type):
+
+```powershell
+docker exec postgresql psql -U admin -d modulobase -c "
+INSERT INTO mb_registered_application (uniqueuuid, clientid, clientsecret, requiredproofkey)
+VALUES ('a1b2c3d4-e5f6-7890-abcd-ef1234567890', 'application-survey', 'surveyaxia', false)
+ON CONFLICT (clientid) DO NOTHING;
+
+INSERT INTO mb_registered_application_authentication_method_set (registered_application_uniqueuuid, authentication_method_set)
+VALUES ('a1b2c3d4-e5f6-7890-abcd-ef1234567890', 'client_secret_basic')
+ON CONFLICT DO NOTHING;
+
+INSERT INTO mb_registered_application_authorization_grant_type_set (registered_application_uniqueuuid, authorization_grant_type_set)
+VALUES ('a1b2c3d4-e5f6-7890-abcd-ef1234567890', 'client_credentials')
+ON CONFLICT DO NOTHING;"
+```
+
+**Cosa significa ogni parte:**
+
+| Tabella | Colonna | Valore | Significato |
+|---|---|---|---|
+| `mb_registered_application` | `clientid` | `application-survey` | Identificativo del client |
+| `mb_registered_application` | `clientsecret` | `surveyaxia` | Password del client (presa da `application-local.yaml`) |
+| `mb_registered_application` | `requiredproofkey` | `false` | PKCE non richiesto (serve solo per i flussi con browser) |
+| `_authentication_method_set` | `authentication_method_set` | `client_secret_basic` | Il client si autentica con HTTP Basic (id + secret nell'header) |
+| `_authorization_grant_type_set` | `authorization_grant_type_set` | `client_credentials` | Flusso server-to-server, nessun utente coinvolto |
+
+#### Verifica
+
+```powershell
+docker exec postgresql psql -U admin -d modulobase -c "SELECT clientid FROM mb_registered_application WHERE clientid = 'application-survey';"
+```
+
+---
+
+### Automatizzare con uno script (consigliato)
+
+Entrambe le configurazioni si prestano bene ad essere racchiuse in uno script da eseguire una volta sola dopo il primo avvio del PostgreSQL. È possibile creare un file PowerShell `init-postgres.ps1` da mettere insieme agli altri script di setup del progetto:
+
+```powershell
+# init-postgres.ps1
+# Popola il database PostgreSQL del Modulo Base con i dati necessari al Survey.
+# Da eseguire una sola volta dopo il primo avvio del container postgresql.
+
+Write-Host "Inserimento ruoli Survey in mb_role..."
+docker exec postgresql psql -U admin -d modulobase -c "
+INSERT INTO mb_role (role_name, annullato, data_creazione, data_aggiornamento, creato_da, aggiornato_da, programma)
+VALUES ('COMPANY', '', NOW(), NOW(), 'system', 'system', '') ON CONFLICT (role_name) DO NOTHING;
+INSERT INTO mb_role (role_name, annullato, data_creazione, data_aggiornamento, creato_da, aggiornato_da, programma)
+VALUES ('CANDIDATE', '', NOW(), NOW(), 'system', 'system', '') ON CONFLICT (role_name) DO NOTHING;
+INSERT INTO mb_role (role_name, annullato, data_creazione, data_aggiornamento, creato_da, aggiornato_da, programma)
+VALUES ('ROLE_ADMIN', '', NOW(), NOW(), 'system', 'system', '') ON CONFLICT (role_name) DO NOTHING;"
+
+Write-Host "Registrazione client OAuth2 application-survey..."
+docker exec postgresql psql -U admin -d modulobase -c "
+INSERT INTO mb_registered_application (uniqueuuid, clientid, clientsecret, requiredproofkey)
+VALUES ('a1b2c3d4-e5f6-7890-abcd-ef1234567890', 'application-survey', 'surveyaxia', false)
+ON CONFLICT (clientid) DO NOTHING;
+INSERT INTO mb_registered_application_authentication_method_set (registered_application_uniqueuuid, authentication_method_set)
+VALUES ('a1b2c3d4-e5f6-7890-abcd-ef1234567890', 'client_secret_basic')
+ON CONFLICT DO NOTHING;
+INSERT INTO mb_registered_application_authorization_grant_type_set (registered_application_uniqueuuid, authorization_grant_type_set)
+VALUES ('a1b2c3d4-e5f6-7890-abcd-ef1234567890', 'client_credentials')
+ON CONFLICT DO NOTHING;"
+
+Write-Host "Configurazione PostgreSQL completata."
+```
+
+**Come usarlo:**
+
+```powershell
+# Assicurarsi che il container postgresql sia attivo, poi:
+.\init-postgres.ps1
+```
+
+Grazie agli `ON CONFLICT ... DO NOTHING`, lo script è **idempotente**: può essere eseguito più volte senza causare errori o duplicati.
+
+> **Nota:** lo script andrebbe aggiunto alla cartella `C:\dev\Projects\lisa-moduli-backend\survey\resources\` insieme agli altri script di inizializzazione, in modo che sia versionato con il progetto e disponibile per tutti i colleghi che configurano l'ambiente locale.
+
+---
+
 ## Parte 4 — Avvio del Backend Survey
 
 ### Requisito: JDK 17
@@ -486,6 +619,38 @@ docker exec postgresql psql -U admin -d modulobase -c "INSERT INTO mb_registered
 
 ---
 
+### Errore 8 — `401` su tutte le chiamate del backend Survey al Modulo Base
+
+Il Survey restituisce `500` con messaggio interno `401 : [no body]` su qualsiasi endpoint che richieda autenticazione verso il Modulo Base (es. `POST /api/survey/public/linkLogin`).
+
+**Causa:** Il backend Survey usa un Feign client con autenticazione OAuth2 client credentials. Prima di ogni chiamata al Modulo Base, ottiene un token presentandosi come `application-survey` con secret `surveyaxia` (configurati in `application-local.yaml`). Il Modulo Base carica i client OAuth2 dalla tabella `mb_registered_application` **una volta sola all'avvio**, in memoria (`InMemoryRegisteredClientRepository`). Se `application-survey` non era presente al momento dell'avvio del container, il Modulo Base non lo conosce e risponde 401.
+
+**Soluzione in due passi:**
+
+1. Inserire il client nel database (vedi Parte 3b — Configurazione 2)
+2. **Riavviare il container** `lisamodulobase` affinché ricarichi i client dalla tabella:
+```powershell
+docker restart lisamodulobase
+```
+
+> **Nota importante:** l'INSERT da solo non basta — il riavvio è obbligatorio ogni volta che si modifica `mb_registered_application` o le sue tabelle correlate.
+
+---
+
+### Errore 9 — Link al questionario irraggiungibile (`127.0.0.1` vs `localhost`)
+
+Il link generato per il candidato (es. `http://127.0.0.1:4200/attemptLandingPage?content=...`) non funziona nel browser.
+
+**Causa:** In `application-local.yaml`, `survey.base-url` era impostato a `http://127.0.0.1:4200`. Anche se `127.0.0.1` e `localhost` sono tecnicamente equivalenti, il browser li tratta come origini diverse. Il frontend Angular risponde su `localhost:4200`, non su `127.0.0.1:4200`, rendendo il link irraggiungibile.
+
+**Soluzione:** Cambiare `survey.base-url` in `application-local.yaml`:
+```yaml
+survey:
+  base-url: http://localhost:4200   # non http://127.0.0.1:4200
+```
+
+---
+
 ## Flusso completo per i prossimi avvii
 
 Dalla seconda volta in poi, il database esiste già e i dati sono caricati. Il flusso è molto più veloce:
@@ -534,3 +699,9 @@ npx ng serve --port 4200
 - Il file `settings.json` del frontend va ricordato: ogni volta che si clona il progetto andrà modificato per puntare ad `https://authorization-dev.lisasuite.it`
 - Il frontend Survey deve girare sulla porta **4200**, non 4201 — il redirect URI registrato nel DB è esattamente `http://localhost:4200/callback` e Spring Security fa un confronto esatto
 - Prima di avviare il frontend, fermare sempre `lisamodulobase-angular` che occupa la porta 4200
+- `survey.base-url` in `application-local.yaml` deve essere `http://localhost:4200`, non `http://127.0.0.1:4200` — il browser li tratta come origini diverse e il link al questionario risulterebbe irraggiungibile
+- Dopo qualsiasi INSERT su `mb_registered_application` (o tabelle correlate) bisogna fare `docker restart lisamodulobase` — i client OAuth2 vengono caricati in memoria una volta sola all'avvio del container
+
+
+---
+
