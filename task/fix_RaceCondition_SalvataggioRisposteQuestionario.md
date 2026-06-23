@@ -322,4 +322,4 @@ Body: { "quizId": "...", "questionId": "<A.id>", "newChoiceId": "<choiceId_del_2
 - Method reference Java (`answerRepo::delete`): sintassi compatta equivalente a `answer -> answerRepo.delete(answer)`.
 - Race condition: bug che si verifica quando due operazioni concorrenti modificano lo stesso stato condiviso in un ordine non deterministico.
 - Semantica HTTP PUT vs POST: POST = "crea una nuova risorsa", PUT = "sostituisci la risorsa con questo" — PUT è naturalmente idempotente (chiamarlo più volte produce lo stesso risultato).
-- Collegato a: `..\concetti\concetti_stack_LISA_Survey.md`
+- Collegato a: `..\concetti\concetti_stack_LISA_Survey.md` e `..\concetti\concetti_Transactional_DTO_Angular_Fondamentali.md`
