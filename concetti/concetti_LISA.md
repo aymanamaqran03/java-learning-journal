@@ -1,6 +1,322 @@
-# LISA2Next — Documentazione Tecnica
+# Concetti — Piattaforma LISA
 
-## 1. Architettura del progetto
+> **Categoria:** `LISA Survey / LISA2Next / Architettura / Infrastruttura`
+> **Aggiornato:** `30/06/2026`
+
+---
+
+## Indice
+
+**LISA Survey**
+
+1. [Architettura a Microservizi](#1-architettura-a-microservizi)
+2. [NGP Stack — Infrastruttura base](#2-ngp-stack--infrastruttura-base)
+3. [Multi-Tenancy](#3-multi-tenancy)
+4. [OAuth2 — Configurazione specifica LISA](#4-oauth2--configurazione-specifica-lisa)
+5. [Riepilogo visivo — Stack LISA Survey](#5-riepilogo-visivo--stack-lisa-survey)
+6. [Riepilogo visivo — Flusso richiesta Survey (Angular → Spring Boot)](#6-riepilogo-visivo--flusso-richiesta-survey-angular--spring-boot)
+
+**LISA2Next**
+
+7. [Architettura del progetto](#7-architettura-del-progetto)
+8. [Il processo di build e deploy](#8-il-processo-di-build-e-deploy)
+9. [Il Data Object (DO)](#9-il-data-object-do)
+10. [L'annotazione @DOMetaData](#10-lannotazione-dometadata)
+11. [Il meccanismo di persistenza — solo scrittura](#11-il-meccanismo-di-persistenza--solo-scrittura)
+12. [La SELECT — completamente separata dalla persistenza](#12-la-select--completamente-separata-dalla-persistenza)
+13. [Il GestioneContabilitaBean — il bean di business](#13-il-gestionecontabilitabean--il-bean-di-business)
+
+---
+
+# PARTE I — LISA Survey
+
+## 1. Architettura a Microservizi
+
+Per capire cosa significa "architettura a microservizi" è utile partire dal suo opposto: l'architettura **monolitica**. In un'applicazione monolitica classica, tutto il codice vive in un unico grande progetto. Il login, la gestione degli utenti, le logiche di business, il database, l'interfaccia — tutto è nello stesso posto, compilato insieme e deployato come un'unica unità. Questa soluzione funziona bene per applicazioni piccole, ma man mano che il sistema cresce, inizia a mostrare i suoi limiti: se vuoi aggiornare solo una piccola parte, devi ridistribuire tutto; se quella parte crasha, può portare giù l'intera applicazione; se un team vuole lavorare su una funzionalità, rischia di entrare in conflitto con il lavoro di un altro team.
+
+L'architettura a microservizi nasce per risolvere esattamente questi problemi. L'idea centrale è semplice: invece di avere un'unica applicazione gigante, si divide il sistema in tanti piccoli servizi indipendenti, ciascuno responsabile di una cosa sola. Ogni servizio ha il proprio codice, il proprio database (se necessario), e comunica con gli altri tramite la rete — di solito attraverso chiamate HTTP o messaggi asincroni.
+
+Nel contesto di LISA Survey, il sistema è suddiviso così:
+
+- Un servizio gestisce solo l'**autenticazione** (il Modulo Base) — chi si può loggare, come vengono rilasciati i token, chi è autorizzato a fare cosa
+- Un servizio gestisce il **registro dei microservizi** (Eureka) — tiene traccia di dove ogni servizio è in esecuzione
+- Un servizio fa da **punto di ingresso unico** per tutte le richieste (API Gateway) — le instrada al servizio giusto
+- Un servizio gestisce la **logica del Survey** — questionari, domande, risposte
+
+Ogni servizio può essere avviato, fermato, aggiornato e scalato in modo completamente indipendente. Se c'è un bug nel servizio Survey, non tocchi il servizio di autenticazione. Se vuoi aggiornare il gateway, non devi toccare nient'altro.
+
+Il rovescio della medaglia è la complessità operativa: per far funzionare anche una sola funzionalità devi avere **tutti i servizi dipendenti** in esecuzione. È questo il motivo per cui, prima di poter lavorare al Survey, hai dovuto avviare la Trinità: il Survey dipende dall'autenticazione (Modulo Base) per sapere chi è loggato, e dall'Eureka per sapere dove sono gli altri servizi.
+
+---
+
+## 2. NGP Stack — Infrastruttura base
+
+L'infrastruttura base per sviluppare qualsiasi modulo LISA è il **NGP Stack**: un insieme di container Docker che devono essere sempre in esecuzione. A differenza della vecchia "Trinità" (un unico `trinity.yml`), ogni servizio ha ora il proprio file Docker Compose dedicato, con immagini aggiornate e allineate. I file si trovano in `C:\dev\NGP\ngp-stack\`.
+
+---
+
+### discoveryservice — Eureka
+
+È il **registro centrale** dove tutti i microservizi si iscrivono all'avvio e comunicano la propria posizione sulla rete. Gira sulla porta **9201**. Tecnicamente è un'istanza di **Eureka Server**. Senza questo container, i microservizi non riescono a trovarsi tra loro. Definito in `discovery-service.yml`.
+
+---
+
+### apigateway — API Gateway
+
+È il **punto di ingresso unico** per tutte le richieste esterne. Gira sulla porta **9102**. Quando il frontend fa una chiamata HTTP a un microservizio, non lo chiama direttamente — passa sempre attraverso il gateway, che sa dove instradare la richiesta. Questo rende il sistema più sicuro (un unico punto dove applicare autenticazione e controllo degli accessi) e più flessibile (si può spostare un microservizio su un'altra porta senza che il frontend lo sappia). Definito in `api-gateway.yml`.
+
+---
+
+### lisamodulobase — Modulo Base
+
+È il **cuore dell'autenticazione e dell'autorizzazione** dell'intera piattaforma LISA. Gira sulla porta **9000**. Implementa un server OAuth2 completo: gestisce gli utenti, rilascia token JWT, verifica le credenziali. A differenza della vecchia trinity, questo modulobase usa **PostgreSQL locale** come database — non dipende da nessun server remoto. Definito in `modulobase-backend.yml`.
+
+---
+
+### nginx — Reverse proxy
+
+Espone il modulobase all'URL `https://authorization-dev.lisasuite.it` gestendo SSL. Il browser e le applicazioni non parlano mai direttamente con la porta 9000 — passano sempre attraverso nginx, che smista le richieste al container giusto. Definito in `nginx.yml`.
+
+---
+
+### postgresql — Database del Modulo Base
+
+Contiene tutti i dati del modulobase: utenti, client OAuth2 registrati, redirect URI, profili applicativi. Gira sulla porta **5432**. Definito in `postgresql.yml`.
+
+---
+
+### Struttura dei file e rete condivisa
+
+Ogni file è un compose separato, ma tutti condividono la **stessa rete Docker esterna** chiamata `modulobase`. Questo è il meccanismo che permette ai container di vedersi tra loro anche se sono definiti in file diversi.
+
+```
+C:\dev\NGP\ngp-stack\
+├── .env                    ← variabili lette da tutti i file
+├── discovery-service.yml   ← discoveryservice  (porta 9201)
+├── api-gateway.yml         ← apigateway        (porta 9102)
+├── modulobase-backend.yml  ← lisamodulobase    (porta 9000)
+├── nginx.yml               ← nginx             (porta 80/443)
+└── postgresql.yml          ← postgresql        (porta 5432)
+```
+
+Il file `.env` contiene le variabili condivise:
+
+```env
+MODULOBASE_NETWORK=modulobase              # nome della rete Docker condivisa
+VOLUMES_ROOT=C:/Dev/NGP/volumes            # root dei volumi persistenti
+POSTGRES_PASSWORD=localpassword
+MODULOBASE_ISSUER_URI_HOST=https://authorization-dev.lisasuite.it
+```
+
+**La chiave da capire sulle reti Docker**: i container sulla stessa rete si "vedono" usando il loro `container_name` come hostname. Per questo `api-gateway.yml` ha `EUREKA-HOST-NAME=discoveryservice` — `discoveryservice` è il nome del container Eureka sulla rete `modulobase`. Se mettessi `localhost` dentro un container, si riferirebbe al container stesso, non all'host fisico.
+
+---
+
+## 3. Multi-Tenancy
+
+### Teoria
+
+La **multi-tenancy** (multi-inquilinato) è un pattern architetturale dove una singola istanza dell'applicazione serve **più clienti distinti** (i "tenant"), mantenendo i loro dati completamente separati e isolati.
+
+Nella piattaforma LISA, ogni azienda cliente è un tenant. Più aziende usano la stessa applicazione Survey, ma ogni azienda vede solo i propri questionari, i propri candidati, le proprie risposte.
+
+I tre approcci principali per implementare la multi-tenancy:
+
+| Approccio | Come funziona | Pro/Contro |
+|---|---|---|
+| **Database separato** | Ogni tenant ha il suo DB | Massimo isolamento, costoso |
+| **Schema separato** | Stesso DB, schemi diversi | Buon isolamento, medio |
+| **Tabella condivisa + discriminatore** | Stesso schema, colonna `company_id` | Economico, richiede disciplina nei filtri |
+
+LISA Survey usa il terzo approccio: ogni tabella ha una colonna `company_id` (o `companyId`), e ogni query filtra per questo valore.
+
+### TenantContext nel codice
+
+```java
+// Nel service, quando si crea una nuova risposta:
+answer.setCompanyId(TenantContext.currentTenant());
+// ↑ recupera il tenant dell'utente corrente dal contesto della richiesta
+```
+
+`TenantContext` è una classe che usa un `ThreadLocal` — una variabile che è locale al **thread** corrente (ogni richiesta HTTP è gestita da un thread separato). All'inizio di ogni richiesta, un filtro (`tenantDataFilter.setFilter()`) legge il header `X-Tenant` dalla richiesta HTTP e lo salva nel `ThreadLocal`. Da quel momento, qualsiasi codice eseguito nel contesto di quella richiesta può chiamare `TenantContext.currentTenant()` e ottenere il tenant corretto.
+
+```java
+// Nel Controller:
+@PutMapping
+public ResponseEntity<Void> setPickAnswer(
+        @RequestHeader("X-Tenant") String tenant,   // ← letto dall'header HTTP
+        ...) {
+    tenantDataFilter.setFilter(); // ← salva il tenant nel ThreadLocal
+    answerService.setPickAnswer(dto);
+    return ResponseEntity.ok().build();
+}
+```
+
+### X-Tenant — il header HTTP
+
+Il frontend Angular include in ogni richiesta al backend l'header `X-Tenant` con l'identificatore dell'azienda dell'utente loggato. Questo header non fa parte dello standard HTTP (gli header che iniziano con `X-` sono custom), ma è la convenzione usata in LISA.
+
+---
+
+## 4. OAuth2 — Configurazione specifica LISA
+
+### Due istanze di Modulo Base
+
+Sul PC di sviluppo coesistono **due istanze diverse** del Modulo Base, per due contesti diversi:
+
+In locale si usa esclusivamente il **Modulo Base NGP**:
+
+| Container | Porta esposta | Database | URL pubblico |
+|---|---|---|---|
+| `lisamodulobase` | 9000 (dietro nginx) | PostgreSQL locale | `https://authorization-dev.lisasuite.it` |
+
+Il profilo `local` del Survey punta a `https://authorization-dev.lisasuite.it` — nginx riceve la richiesta e la smista al container `lisamodulobase` sulla rete Docker `modulobase`. Gli utenti e i client OAuth2 (tra cui `angular-client`) vivono nel database PostgreSQL locale.
+
+> La vecchia "trinity-modulobase" (che si connetteva a un SQL Server remoto su `10.204.204.114`) non viene più usata in locale — il team ha migrato tutto al NGP stack con immagini aggiornate e database locale.
+
+### Tabella redirect_uri in LISA
+
+Nel Modulo Base NGP, i redirect URI non si trovano nella tabella standard Spring `oauth2_registered_client`. Si trovano nella tabella personalizzata:
+
+```
+mb_registered_application_redirect_uri_set
+```
+
+Quando il login fallisce con errore 400 (redirect_uri non riconosciuto), è qui che si va ad aggiungere la URI mancante. Spring Authorization Server fa un confronto **esatto** sulla stringa — porta 4200 e porta 4201 sono diverse, `/callback` e assenza di `/callback` sono diversi.
+
+### Configurazione Spring Security OAuth2 del Survey backend
+
+```yaml
+spring:
+  security:
+    oauth2:
+      resourceserver:
+        jwt:
+          jwk-set-uri: https://authorization-dev.lisasuite.it/oauth2/jwks
+          issuer-uri: https://authorization-dev.lisasuite.it
+```
+
+`jwks` (JSON Web Key Set) è l'endpoint del Modulo Base che espone le chiavi pubbliche usate per verificare la firma dei token. Il backend Survey scarica queste chiavi all'avvio e le usa per validare ogni token JWT ricevuto senza dover fare una chiamata di rete ad ogni richiesta.
+
+---
+
+## 5. Riepilogo visivo — Stack LISA Survey
+
+```
+BROWSER (localhost:4200)
+    │ usa
+    ▼
+ANGULAR (framework frontend)
+    │ costruito con
+    ├── Angular CLI (strumenti sviluppo)
+    └── DevExtreme UI (componenti grafici)
+    │
+    │ redirect per login → https://authorization-dev.lisasuite.it/login
+    │ callback con codice → http://localhost:4200/callback
+    │ poi HTTP + JWT token
+    ▼
+API GATEWAY — apigateway / NGP Stack (porta 9102)
+    │ instrada le richieste consultando
+    ▼
+EUREKA — discoveryservice / NGP Stack (porta 9201)
+    │ sa dove si trova
+    ▼
+SURVEY BACKEND — Spring Boot (porta 9090)
+    │ usa
+    ├── Spring Security OAuth2 (verifica il token JWT)
+    ├── Spring Cloud Eureka Client (si registra su Eureka)
+    ├── Swagger UI (documentazione API esposta su /swagger-ui)
+    └── JPA/Hibernate (accesso al database)
+    │
+    ├── verifica token con ──► NGP MODULO BASE — authorization-dev.lisasuite.it
+    │                               │ implementa
+    │                               ├── OAuth2 Authorization Server
+    │                               ├── Database: PostgreSQL locale (container postgresql)
+    │                               └── Redirect URI registrati per angular-client
+    │                                     incluso: http://localhost:4200/callback
+    │
+    └── legge/scrive su
+    ▼
+SQL SERVER — container Docker (porta 1433)
+    │ dati persistiti su
+    └── Volume Docker → C:\dev\NGP\volumes\mssql2019
+```
+
+---
+
+## 6. Riepilogo visivo — Flusso richiesta Survey (Angular → Spring Boot)
+
+```
+FRONTEND Angular
+┌─────────────────────────────────────────────────────┐
+│  Model (.ts)                                        │
+│  export interface PickAnswerDTO {                   │
+│      quizId?: string; questionId?: string; ...      │
+│  }                                                  │
+│         ↓ usato da                                  │
+│  Service Angular (answerApi.service.ts)             │
+│  @Injectable — singleton per l'app                  │
+│  public setPickAnswer(...): Observable<any> {       │
+│      return this.httpClient.request('put', ...);    │
+│  }                                                  │
+│         ↓ usato da                                  │
+│  Helper nel Componente                              │
+│  async setPickAnswer(questionId, newChoiceId) {     │
+│      const dto = { quizId: this.quizId, ... };      │
+│      await new Promise((resolve, reject) => {       │
+│          service.setPickAnswer(tenant, dto)         │
+│              .subscribe({ next: resolve,            │
+│                           error: reject });         │
+│      });                                            │
+│  }                                                  │
+└──────────────────────┬──────────────────────────────┘
+                       │ HTTP PUT /api/survey/answer
+                       │ Header: X-Tenant: <azienda>
+                       │ Body: { quizId, questionId, newChoiceId }
+                       ▼
+BACKEND Spring Boot
+┌─────────────────────────────────────────────────────┐
+│  Controller (AnswerAPI.java)                        │
+│  @PutMapping                                        │
+│  public ResponseEntity<Void> setPickAnswer(         │
+│      @RequestHeader("X-Tenant") String tenant,      │
+│      @RequestBody PickAnswerDTO dto) {              │
+│      tenantDataFilter.setFilter(); ← salva tenant  │
+│      answerService.setPickAnswer(dto); ← delega    │
+│      return ResponseEntity.ok().build();            │
+│  }                                                  │
+│         ↓ delega a                                  │
+│  Service (AnswerService.java)                       │
+│  @Transactional ← atomicità garantita              │
+│  public void setPickAnswer(PickAnswerDTO dto) {     │
+│      // cerca risposta esistente                    │
+│      Optional<Answer> existing = answerRepo         │
+│          .findByAttemptQuizIdAndQuestionId(...);    │
+│      existing.ifPresent(answerRepo::delete); ← cancella
+│      if (dto.getNewChoiceId() != null) {            │
+│          Answer a = new Answer();                   │
+│          a.setCompanyId(TenantContext.currentTenant());
+│          answerRepo.save(a); ← inserisce           │
+│      }                                             │
+│  }                                                  │
+│         ↓ usa                                       │
+│  Repository (AnswerRepository.java)                 │
+│  interface AnswerRepository                         │
+│      extends JpaRepository<Answer, String> {       │
+│      Optional<Answer> findByAttemptQuizId           │
+│          AndQuestionId(String, String);            │
+│  }         ↑ Spring genera il SQL automaticamente   │
+│         ↓ Hibernate traduce in SQL                  │
+│  Database SQL Server                                │
+│  SELECT/DELETE/INSERT su tabella answers            │
+└─────────────────────────────────────────────────────┘
+```
+
+---
+
+# PARTE II — LISA2Next
+
+## 7. Architettura del progetto
 
 LISA2Next è strutturato come applicazione **Java EE** (Java Enterprise Edition) con un'architettura ibrida client-server. Il progetto è composto da due macro-aree con tecnologie e processi di build distinti.
 
@@ -21,6 +337,7 @@ LISA2Next/
     ├── ScrollableDesktop   → libreria UI desktop
     └── LISAClient          → applicazione Swing desktop
 ```
+
 ### Composizione dettagliata
 
 **JavaCore — Libreria core condivisa (JAR)**
@@ -95,11 +412,13 @@ Dipende da: JavaCore + LISAServicesClient
 
 Cosa contiene:
 - Bean EJB annotati con @Stateless e @Local che avvolgono i bean di POJOEJBServices:
+```java
 @Stateless
 @Local(IGestioneContabilita.class)
 public class GestioneContabilita implements IGestioneContabilita {
     // delega a GestioneContabilitaBean
 }
+```
 - Il Persistor — implementazione ORM completa (~1300 righe) con operazioni CRUD, relazioni 1-N, N-N
 - UserManagement, SessionRegistry — gestione sessioni e utenti
 - BaseService — classe base con connessione al DB e utility condivise
@@ -144,7 +463,7 @@ Cosa contiene:
   - ProdottiResource — catalogo prodotti
   - ProduzioneResource — dati produzione
   - Controller di integrazione con sistemi esterni:
-      - ShopifyEndpoint — e-commerce Shopify
+    - ShopifyEndpoint — e-commerce Shopify
     - WooSitipEndpoint — WooCommerce
     - IFMulesoftController, IF001Controller...IF012Controller — integrazione supply chain con GFCOpernico via Mulesoft
 
@@ -182,6 +501,8 @@ Non contiene codice applicativo. Il suo unico scopo è assemblare tutti i moduli
 Cosa fa:
 - Il pom.xml dichiara come dipendenze tutti i moduli precedenti
 - Il plugin maven-ear-plugin li raccoglie e produce LISA2.ear con questa struttura interna:
+
+```
 LISA2.ear
 ├── LISAServices.jar        ← modulo EJB
 ├── LISA2Web.war            ← servlet layer
@@ -191,13 +512,17 @@ LISA2.ear
     ├── javacore-0.0.1.jar       ← libreria core
     ├── POJOEJBServices-0.0.1.jar ← bean di business
     └── lisaservicesclient-0.0.1.jar ← interfacce EJB
+```
+
 - application.xml definisce i context-root dei WAR e la cartella lib/
 
 WildFly carica l'EAR, registra i bean EJB nel container, e mette in ascolto i WAR sui rispettivi context path.
 
 ---
-Grafico delle dipendenze
 
+### Grafico delle dipendenze
+
+```
 JavaCore  ←──────────────────────────── tutto dipende da qui
     ↑
 LISAServicesClient  ←─────────────────── contratti EJB
@@ -211,6 +536,7 @@ POJOEJBServices     LISAServices  ←───── implementazione EJB
        NETBridge     ←────────────────── bridge .NET / palmari
             ↓
           LISA2 (EAR) ←─────────────── pacchetto finale
+```
 
 ### Server
 
@@ -224,7 +550,7 @@ Il client è un'applicazione **Java Swing** desktop, costruita con **NetBeans/An
 
 ---
 
-## 2. Il processo di build e deploy
+## 8. Il processo di build e deploy
 
 ### Server — Maven
 
@@ -268,7 +594,7 @@ La suddivisione in JAR tematici serve per **Java Web Start (JNLP)**: il client s
 
 ---
 
-## 3. Il Data Object (DO)
+## 9. Il Data Object (DO)
 
 I Data Object sono classi POJO che mappano le tabelle AS/400. Estendono `DataObject` e usano l'annotazione `@DOMetaData` su ogni campo pubblico.
 
@@ -283,7 +609,7 @@ I nomi dei campi corrispondono esattamente ai nomi delle colonne sulla tabella A
 
 ---
 
-## 4. L'annotazione `@DOMetaData`
+## 10. L'annotazione `@DOMetaData`
 
 Ogni campo pubblico del DO è annotato per descrivere come deve essere trattato dal framework.
 
@@ -326,7 +652,7 @@ Ogni campo pubblico del DO è annotato per descrivere come deve essere trattato 
 
 ---
 
-## 5. Il meccanismo di persistenza — solo scrittura
+## 11. Il meccanismo di persistenza — solo scrittura
 
 Il flag `persistent` governa **esclusivamente le operazioni di scrittura** (INSERT/UPDATE). Non ha nessun effetto sulla SELECT.
 
@@ -377,7 +703,7 @@ Esistono solo in memoria. Esempi in `DOProvvigioni`:
 
 ---
 
-## 6. La SELECT — completamente separata dalla persistenza
+## 12. La SELECT — completamente separata dalla persistenza
 
 La lettura dei dati non usa reflection né `@DOMetaData`. Il bean costruisce la query manualmente usando la classe `Query`.
 
@@ -417,7 +743,7 @@ Il metodo richiede `MAX_RESULT + 1` record (51 invece di 50):
 
 ---
 
-## 7. Il `GestioneContabilitaBean` — il bean di business
+## 13. Il GestioneContabilitaBean — il bean di business
 
 Ogni metodo pubblico del bean segue questo pattern:
 
@@ -441,3 +767,11 @@ public ApplicationContext metodo(ApplicationContext ctx) {
 `ApplicationContext` è il contenitore che viaggia tra client e server, portando: connessione DB, attributi in ingresso, risultati in uscita, stato dell'operazione e dati utente.
 
 ---
+
+## Note personali
+
+- **redirect_uri: ogni carattere conta** — Spring Authorization Server fa un confronto esatto della stringa. `localhost` e `127.0.0.1` sono diversi. `/callback` e l'assenza di `/callback` sono diversi. Porta 4200 e porta 4201 sono diverse. Se il login fallisce con errore 400, il primo posto dove guardare è la tabella `mb_registered_application_redirect_uri_set` nel database PostgreSQL del Modulo Base NGP.
+
+- **Due Modulo Base in locale** — La trinity usa il modulobase con SQL Server remoto (utenti di sviluppo condivisi), il progetto NGP usa il modulobase con PostgreSQL locale. Per il Survey in locale si usa sempre `authorization-dev.lisasuite.it` (NGP), non `localhost:9000` (trinity). La vecchia trinity-modulobase non viene più usata in locale.
+
+- **La rete interna Docker è trasparente per i container** — I container si vedono tramite hostname senza che tu faccia nulla, ma dall'host (il tuo PC) devi usare `localhost:<porta mappata>`. Quando una variabile d'ambiente dentro un container dice `http://discoveryservice:9201`, funziona perché entrambi i container sono sulla stessa rete Docker. Se metti quell'URL nel browser, non funzionerà.
